@@ -65,7 +65,7 @@ L’objectif principal de ProMatch est de réduire la durée du processus de rec
 
 * Git
 * GitHub
-* Postman (tests API)
+* Thunder Client (tests API) integré dans VS Code
 
 ---
 
