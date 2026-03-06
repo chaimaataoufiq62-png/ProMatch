@@ -12,11 +12,11 @@
 - [x] Seed test data
 
 ## Authentication
-- [ ] Register endpoint
-- [ ] Login endpoint
-- [ ] Password hashing (bcrypt)
-- [ ] JWT authentication
-- [ ] Auth middleware
+- [x] Register endpoint
+- [x] Login endpoint
+- [x] Password hashing (bcrypt)
+- [x] JWT authentication
+- [x] Auth middleware
 
 ## Candidate features
 - [ ] Candidate profile API

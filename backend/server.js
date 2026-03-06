@@ -28,3 +28,14 @@ app.get("/db-test", async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+const authRoutes = require("./routes/authRoutes");
+
+app.use("/api/auth", authRoutes);
+const authMiddleware = require("./middlewares/authMiddleware");
+
+app.get("/api/profile", authMiddleware, (req, res) => {
+  res.json({
+    message: "Utilisateur authentifié",
+    user: req.user
+  });
+});
