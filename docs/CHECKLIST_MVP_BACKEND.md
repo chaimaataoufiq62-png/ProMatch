@@ -19,7 +19,7 @@
 - [x] Auth middleware
 
 ## Candidate features
-- [ ] Candidate profile API
+- [x] Candidate profile API
 - [ ] Add candidate skills
 - [ ] View matching challenges
 
