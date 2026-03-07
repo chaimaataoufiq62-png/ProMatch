@@ -21,5 +21,5 @@ async function testConnection() {
 
 testConnection();
 
-console.log("Database connected");
+
 module.exports = pool;
