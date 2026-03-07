@@ -9,5 +9,17 @@ const pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0,
 });
+async function testConnection() {
+  try {
+    const connection = await pool.getConnection();
+    console.log("Database really connected");
+    connection.release();
+  } catch (error) {
+    console.error("Database connection failed:", error.message);
+  }
+}
+
+testConnection();
+
 console.log("Database connected");
 module.exports = pool;
