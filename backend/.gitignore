@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Environment variables — NEVER commit secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+
+# Uploaded files
+uploads/submissions/
+upload/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+*.code-workspace
+.vscode/
+.idea/
+
+# Build / cache
+dist/
+.cache/

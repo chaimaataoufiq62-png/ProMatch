@@ -1,28 +1,21 @@
 const db = require("../config/db");
+const logger = require("../utils/logger");
 
 exports.getCandidateProfile = async (req, res) => {
   try {
     const [rows] = await db.execute(
-      `
-      SELECT *
-      FROM candidat
-      WHERE utilisateur_id = ?
-      `,
+      `SELECT * FROM candidat WHERE utilisateur_id = ?`,
       [req.user.id]
     );
 
     if (rows.length === 0) {
-      return res.status(404).json({
-        message: "Profil candidat introuvable."
-      });
+      return res.status(404).json({ message: "Profil candidat introuvable." });
     }
 
     return res.status(200).json(rows[0]);
   } catch (error) {
-    console.error("Erreur getCandidateProfile :", error);
-    return res.status(500).json({
-      message: "Erreur serveur."
-    });
+    logger.error("Erreur getCandidateProfile :", error);
+    return res.status(500).json({ message: "Erreur serveur." });
   }
 };
 
@@ -39,6 +32,14 @@ exports.updateCandidateProfile = async (req, res) => {
     niveauEtude,
     bio
   } = req.body;
+
+  // Basic validation
+  if (nom !== undefined && typeof nom !== "string") {
+    return res.status(400).json({ message: "Le champ 'nom' est invalide." });
+  }
+  if (prenom !== undefined && typeof prenom !== "string") {
+    return res.status(400).json({ message: "Le champ 'prenom' est invalide." });
+  }
 
   try {
     await db.execute(
@@ -58,30 +59,27 @@ exports.updateCandidateProfile = async (req, res) => {
       WHERE utilisateur_id = ?
       `,
       [
-        nom || null,
-        prenom || null,
-        telephone || null,
-        ville || null,
+        nom?.trim() || null,
+        prenom?.trim() || null,
+        telephone?.trim() || null,
+        ville?.trim() || null,
         dateNaissance || null,
-        ecole || null,
-        diplome || null,
-        specialite || null,
-        niveauEtude || null,
-        bio || null,
+        ecole?.trim() || null,
+        diplome?.trim() || null,
+        specialite?.trim() || null,
+        niveauEtude?.trim() || null,
+        bio?.trim() || null,
         req.user.id
       ]
     );
 
-    return res.status(200).json({
-      message: "Profil candidat mis à jour avec succès."
-    });
+    return res.status(200).json({ message: "Profil candidat mis à jour avec succès." });
   } catch (error) {
-    console.error("Erreur updateCandidateProfile :", error);
-    return res.status(500).json({
-      message: "Erreur serveur."
-    });
+    logger.error("Erreur updateCandidateProfile :", error);
+    return res.status(500).json({ message: "Erreur serveur." });
   }
 };
+
 exports.getCandidateSkills = async (req, res) => {
   try {
     const [candidateRows] = await db.execute(
@@ -90,16 +88,14 @@ exports.getCandidateSkills = async (req, res) => {
     );
 
     if (candidateRows.length === 0) {
-      return res.status(404).json({
-        message: "Candidat introuvable."
-      });
+      return res.status(404).json({ message: "Candidat introuvable." });
     }
 
     const candidatId = candidateRows[0].id;
 
     const [skills] = await db.execute(
       `
-      SELECT 
+      SELECT
         cc.id,
         cc.competence_id,
         c.nom AS competenceNom,
@@ -114,10 +110,8 @@ exports.getCandidateSkills = async (req, res) => {
 
     return res.status(200).json(skills);
   } catch (error) {
-    console.error("Erreur getCandidateSkills :", error);
-    return res.status(500).json({
-      message: "Erreur serveur."
-    });
+    logger.error("Erreur getCandidateSkills :", error);
+    return res.status(500).json({ message: "Erreur serveur." });
   }
 };
 
@@ -125,9 +119,7 @@ exports.addOrUpdateCandidateSkills = async (req, res) => {
   const { skills } = req.body;
 
   if (!Array.isArray(skills) || skills.length === 0) {
-    return res.status(400).json({
-      message: "La liste des compétences est invalide."
-    });
+    return res.status(400).json({ message: "La liste des compétences est invalide." });
   }
 
   let connection;
@@ -139,9 +131,7 @@ exports.addOrUpdateCandidateSkills = async (req, res) => {
     );
 
     if (candidateRows.length === 0) {
-      return res.status(404).json({
-        message: "Candidat introuvable."
-      });
+      return res.status(404).json({ message: "Candidat introuvable." });
     }
 
     const candidatId = candidateRows[0].id;
@@ -181,24 +171,16 @@ exports.addOrUpdateCandidateSkills = async (req, res) => {
         [candidatId, competenceId, niveau]
       );
     }
-await connection.commit();
 
-    return res.status(200).json({
-      message: "Compétences candidat enregistrées avec succès."
-    });
+    await connection.commit();
+
+    return res.status(200).json({ message: "Compétences candidat enregistrées avec succès." });
   } catch (error) {
-    if (connection) {
-      await connection.rollback();
-    }
-
-    console.error("Erreur addOrUpdateCandidateSkills :", error);
-    return res.status(500).json({
-      message: "Erreur serveur."
-    });
+    if (connection) await connection.rollback();
+    logger.error("Erreur addOrUpdateCandidateSkills :", error);
+    return res.status(500).json({ message: "Erreur serveur." });
   } finally {
-    if (connection) {
-      connection.release();
-    }
+    if (connection) connection.release();
   }
 };
 
@@ -212,34 +194,23 @@ exports.deleteCandidateSkill = async (req, res) => {
     );
 
     if (candidateRows.length === 0) {
-      return res.status(404).json({
-        message: "Candidat introuvable."
-      });
+      return res.status(404).json({ message: "Candidat introuvable." });
     }
 
     const candidatId = candidateRows[0].id;
 
     const [result] = await db.execute(
-      `
-      DELETE FROM candidat_competence
-      WHERE candidat_id = ? AND competence_id = ?
-      `,
+      `DELETE FROM candidat_competence WHERE candidat_id = ? AND competence_id = ?`,
       [candidatId, competenceId]
     );
 
     if (result.affectedRows === 0) {
-      return res.status(404).json({
-        message: "Compétence non trouvée pour ce candidat."
-      });
+      return res.status(404).json({ message: "Compétence non trouvée pour ce candidat." });
     }
 
-    return res.status(200).json({
-      message: "Compétence supprimée avec succès."
-    });
+    return res.status(200).json({ message: "Compétence supprimée avec succès." });
   } catch (error) {
-    console.error("Erreur deleteCandidateSkill :", error);
-    return res.status(500).json({
-      message: "Erreur serveur."
-    });
+    logger.error("Erreur deleteCandidateSkill :", error);
+    return res.status(500).json({ message: "Erreur serveur." });
   }
 };

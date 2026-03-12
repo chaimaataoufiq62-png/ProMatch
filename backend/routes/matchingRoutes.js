@@ -4,7 +4,7 @@ const authMiddleware = require("../middlewares/authMiddleware");
 const { requireRole } = require("../middlewares/roleMiddleware");
 const matchingController = require("../controllers/matchingController");
 
-// côté candidat : voir les challenges matchés
+// Candidate — live match compute
 router.get(
   "/candidate/matches",
   authMiddleware,
@@ -12,13 +12,7 @@ router.get(
   matchingController.getCandidateMatches
 );
 
-// côté entreprise : voir les candidats matchés pour un challenge
-router.get(
-  "/company/challenges/:challengeId/matches",
-  authMiddleware,
-  requireRole("entreprise"),
-  matchingController.getChallengeMatchedCandidates
-);
+// Candidate — saved match results (from DB)
 router.get(
   "/candidate/matches/saved",
   authMiddleware,
@@ -26,21 +20,7 @@ router.get(
   matchingController.getSavedCandidateMatches
 );
 
-router.get(
-  "/company/challenges/:challengeId/matches/saved",
-  authMiddleware,
-  requireRole("entreprise"),
-  matchingController.getSavedChallengeMatches
-);
-
-
-router.get(
-  "/candidate/matches",
-  authMiddleware,
-  requireRole("candidat"),
-  matchingController.getCandidateMatches
-);
-
+// Company — live match compute for a challenge
 router.get(
   "/company/challenges/:challengeId/matches",
   authMiddleware,
@@ -48,13 +28,7 @@ router.get(
   matchingController.getChallengeMatchedCandidates
 );
 
-router.get(
-  "/candidate/matches/saved",
-  authMiddleware,
-  requireRole("candidat"),
-  matchingController.getSavedCandidateMatches
-);
-
+// Company — saved match results for a challenge
 router.get(
   "/company/challenges/:challengeId/matches/saved",
   authMiddleware,
@@ -62,7 +36,7 @@ router.get(
   matchingController.getSavedChallengeMatches
 );
 
-// nouvelle route
+// Trigger matching run (both candidat and entreprise)
 router.post(
   "/matching/run",
   authMiddleware,

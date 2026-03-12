@@ -1,36 +1,16 @@
 const db = require("../config/db");
+const createNotification = require("../utils/createNotification");
+const logger = require("../utils/logger");
+const {
+  getCandidateByUserId,
+  getCompanyByUserId,
+  getChallengeEligibility,
+  checkCandidateEligibilityDetailed
+} = require("../utils/helpers");
 
 const MAX_LEVEL = 5;
 
-// =========================
-// Helpers
-// =========================
-
-async function getCandidateByUserId(userId) {
-  const [rows] = await db.execute(
-    `
-    SELECT *
-    FROM candidat
-    WHERE utilisateur_id = ?
-    `,
-    [userId]
-  );
-
-  return rows.length ? rows[0] : null;
-}
-
-async function getCompanyByUserId(userId) {
-  const [rows] = await db.execute(
-    `
-    SELECT *
-    FROM entreprise
-    WHERE utilisateur_id = ?
-    `,
-    [userId]
-  );
-
-  return rows.length ? rows[0] : null;
-}
+// ─── Local DB helpers ─────────────────────────────────────────────────────────
 
 async function getCandidateSkills(candidatId) {
   const [rows] = await db.execute(
@@ -45,7 +25,6 @@ async function getCandidateSkills(candidatId) {
     `,
     [candidatId]
   );
-
   return rows;
 }
 
@@ -62,83 +41,10 @@ async function getChallengeSkills(challengeId) {
     `,
     [challengeId]
   );
-
   return rows;
 }
 
-async function getChallengeEligibility(challengeId) {
-  const [rows] = await db.execute(
-    `
-    SELECT id, type_critere, valeur
-    FROM challenge_eligibilite
-    WHERE challenge_id = ?
-    `,
-    [challengeId]
-  );
-
-  return rows;
-}
-
-function normalize(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function checkCandidateEligibility(candidate, criteria) {
-  if (!criteria || criteria.length === 0) {
-    return {
-      eligible: true,
-      matchedCriteria: [],
-      failedCriteria: []
-    };
-  }
-
-  const matchedCriteria = [];
-  const failedCriteria = [];
-
-  for (const crit of criteria) {
-    const type = normalize(crit.type_critere);
-    const expected = normalize(crit.valeur);
-
-    let candidateValue = "";
-
-    if (type === "niveauetude") {
-      candidateValue = normalize(candidate.niveauEtude);
-    } else if (type === "specialite") {
-      candidateValue = normalize(candidate.specialite);
-    } else if (type === "ville") {
-      candidateValue = normalize(candidate.ville);
-    } else if (type === "ecole") {
-      candidateValue = normalize(candidate.ecole);
-    } else {
-      // si type inconnu, on le considère non bloquant pour l’instant
-      matchedCriteria.push({
-        type_critere: crit.type_critere,
-        valeur: crit.valeur,
-        note: "critère ignoré"
-      });
-      continue;
-    }
-
-    if (candidateValue === expected) {
-      matchedCriteria.push({
-        type_critere: crit.type_critere,
-        valeur: crit.valeur
-      });
-    } else {
-      failedCriteria.push({
-        type_critere: crit.type_critere,
-        valeurAttendue: crit.valeur,
-        valeurCandidat: candidateValue || null
-      });
-    }
-  }
-
-  return {
-    eligible: failedCriteria.length === 0,
-    matchedCriteria,
-    failedCriteria
-  };
-}
+// ─── Scoring algorithm ────────────────────────────────────────────────────────
 
 function calculateSkillScore(candidateSkills, challengeSkills) {
   if (!challengeSkills || challengeSkills.length === 0) {
@@ -197,14 +103,10 @@ function calculateSkillScore(candidateSkills, challengeSkills) {
       ? 0
       : Math.round((totalObtainedPoints / totalMaxPoints) * 100);
 
-  return {
-    score,
-    matchedSkills,
-    missingSkills,
-    totalObtainedPoints,
-    totalMaxPoints
-  };
+  return { score, matchedSkills, missingSkills, totalObtainedPoints, totalMaxPoints };
 }
+
+// ─── Build full match result ──────────────────────────────────────────────────
 
 async function buildMatchResult(candidate, challenge, persist = false) {
   const candidateSkills = await getCandidateSkills(candidate.id);
@@ -212,7 +114,15 @@ async function buildMatchResult(candidate, challenge, persist = false) {
   const criteria = await getChallengeEligibility(challenge.id);
 
   const skillResult = calculateSkillScore(candidateSkills, challengeSkills);
-  const eligibilityResult = checkCandidateEligibility(candidate, criteria);
+  const eligibilityResult = checkCandidateEligibilityDetailed(candidate, criteria);
+
+  let bonus = 0;
+  if (skillResult.matchedSkills.length >= 2) bonus = 10;
+  if (skillResult.matchedSkills.length >= 3) bonus = 15;
+  const finalScore = Math.min(skillResult.score + bonus, 100);
+
+  // Both conditions must pass: at least one matched skill AND all criteria met
+  const eligible = skillResult.matchedSkills.length > 0 && eligibilityResult.eligible;
 
   const result = {
     challenge: {
@@ -224,8 +134,8 @@ async function buildMatchResult(candidate, challenge, persist = false) {
       dateFin: challenge.dateFin,
       entreprise_id: challenge.entreprise_id
     },
-    score: skillResult.score,
-    eligible: eligibilityResult.eligible,
+    score: finalScore,
+    eligible,
     matchedSkills: skillResult.matchedSkills,
     missingSkills: skillResult.missingSkills,
     matchedCriteria: eligibilityResult.matchedCriteria,
@@ -239,175 +149,8 @@ async function buildMatchResult(candidate, challenge, persist = false) {
   return result;
 }
 
+// ─── Save match to DB ─────────────────────────────────────────────────────────
 
-// =========================
-// Candidate -> matched challenges
-// =========================
-
-exports.getCandidateMatches = async (req, res) => {
-  try {
-     const eligibleOnly = String(req.query.eligibleOnly || "false").toLowerCase() === "true";
-     const minScore = Number(req.query.minScore || 0);
-    const candidate = await getCandidateByUserId(req.user.id);
-    if (!candidate) {
-      return res.status(404).json({
-        message: "Candidat introuvable."
-      });
-    }
-
-    const [challenges] = await db.execute(
-      `
-      SELECT *
-      FROM challenge
-      ORDER BY id DESC
-      `
-    );
-
-    let results = [];
-
-    for (const challenge of challenges) {
-      const match = await buildMatchResult(candidate, challenge, true);
-      results.push(match);
-    }
-
-    if (eligibleOnly) {
-      results = results.filter(match => match.eligible === true);
-    }
-    if (!Number.isNaN(minScore) && minScore > 0) {
-      results = results.filter(match => match.score >= minScore);
-    }
-
-    results.sort((a, b) => {
-      if (b.eligible !== a.eligible) {
-        return Number(b.eligible) - Number(a.eligible);
-      }
-      return b.score - a.score;
-    });
-
-    return res.status(200).json({
-      candidate: {
-        id: candidate.id,
-        nom: candidate.nom,
-        prenom: candidate.prenom
-      },
-      filters: {
-      eligibleOnly,
-       minScore
-      },
-      total: results.length,
-      matches: results
-    });
-  } catch (error) {
-    console.error("Erreur getCandidateMatches :", error);
-    return res.status(500).json({
-      message: "Erreur serveur."
-    });
-  }
-};
-
-// =========================
-// Company -> matched candidates for one challenge
-// =========================
-
-exports.getChallengeMatchedCandidates = async (req, res) => {
-  const { challengeId } = req.params;
-
-  try {
-     const eligibleOnly = String(req.query.eligibleOnly || "false").toLowerCase() === "true";
-    const company = await getCompanyByUserId(req.user.id);
-
-    if (!company) {
-      return res.status(404).json({
-        message: "Entreprise introuvable."
-      });
-    }
-
-    const [challengeRows] = await db.execute(
-      `
-      SELECT *
-      FROM challenge
-      WHERE id = ? AND entreprise_id = ?
-      `,
-      [challengeId, company.id]
-    );
-
-    if (challengeRows.length === 0) {
-      return res.status(404).json({
-        message: "Challenge introuvable ou non autorisé."
-      });
-    }
-
-    const challenge = challengeRows[0];
-
-    const [candidates] = await db.execute(
-      `
-      SELECT *
-      FROM candidat
-      ORDER BY id DESC
-      `
-    );
-
-    let results = [];
-    for (const candidate of candidates) {
-  const candidateSkills = await getCandidateSkills(candidate.id);
-  const challengeSkills = await getChallengeSkills(challenge.id);
-  const criteria = await getChallengeEligibility(challenge.id);
-
-  const skillResult = calculateSkillScore(candidateSkills, challengeSkills);
-  const eligibilityResult = checkCandidateEligibility(candidate, criteria);
-
-  await saveMatchResult(candidate.id, challenge.id, skillResult.score, eligibilityResult.eligible);
-
-  results.push({
-    candidate: {
-      id: candidate.id,
-      nom: candidate.nom,
-      prenom: candidate.prenom,
-      ville: candidate.ville,
-      ecole: candidate.ecole,
-      diplome: candidate.diplome,
-      specialite: candidate.specialite,
-      niveauEtude: candidate.niveauEtude
-    },
-    score: skillResult.score,
-    eligible: eligibilityResult.eligible,
-    matchedSkills: skillResult.matchedSkills,
-    missingSkills: skillResult.missingSkills,
-    matchedCriteria: eligibilityResult.matchedCriteria,
-    failedCriteria: eligibilityResult.failedCriteria
-  });
-}
-    
-if (eligibleOnly) {
-      results = results.filter(match => match.eligible === true);
-    }
-    results.sort((a, b) => {
-      if (b.eligible !== a.eligible) {
-        return Number(b.eligible) - Number(a.eligible);
-      }
-      return b.score - a.score;
-    });
-
-    return res.status(200).json({
-      challenge: {
-        id: challenge.id,
-        titre: challenge.titre,
-        niveau: challenge.niveau
-      },
-      filters: {
-      eligibleOnly,
-       minScore
-      },
-      total: results.length,
-      matches: results
-    });
-  } catch (error) {
-    console.error("Erreur getChallengeMatchedCandidates :", error);
-    return res.status(500).json({
-      message: "Erreur serveur."
-    });
-  }
-};
 async function saveMatchResult(candidatId, challengeId, score, eligible) {
   await db.execute(
     `
@@ -421,17 +164,239 @@ async function saveMatchResult(candidatId, challengeId, score, eligible) {
     [candidatId, challengeId, score, eligible]
   );
 }
+
+// ─── Routes ───────────────────────────────────────────────────────────────────
+
+exports.runMatching = async (req, res) => {
+  try {
+    const { challengeId } = req.body;
+
+    if (req.user.type === "entreprise") {
+      const company = await getCompanyByUserId(req.user.id);
+
+      if (!company) {
+        return res.status(404).json({ message: "Entreprise introuvable." });
+      }
+
+      if (!challengeId) {
+        return res.status(400).json({
+          message: "challengeId est obligatoire pour une entreprise."
+        });
+      }
+
+      const [challengeRows] = await db.execute(
+        `SELECT * FROM challenge WHERE id = ? AND entreprise_id = ?`,
+        [challengeId, company.id]
+      );
+
+      if (challengeRows.length === 0) {
+        return res.status(404).json({ message: "Challenge introuvable ou non autorisé." });
+      }
+
+      const challenge = challengeRows[0];
+
+      const [candidates] = await db.execute(`SELECT * FROM candidat ORDER BY id DESC`);
+
+      let count = 0;
+      for (const candidate of candidates) {
+        const match = await buildMatchResult(candidate, challenge, true);
+        if (match.eligible) {
+          await createNotification(
+            candidate.utilisateur_id,
+            "matching",
+            `Vous êtes éligible pour le challenge "${challenge.titre}".`
+          );
+        }
+        count++;
+      }
+
+      return res.status(200).json({
+        message: "Matching recalculé avec succès pour le challenge.",
+        mode: "challenge",
+        challengeId: challenge.id,
+        totalProcessed: count
+      });
+    }
+
+    if (req.user.type === "candidat") {
+      const candidate = await getCandidateByUserId(req.user.id);
+
+      if (!candidate) {
+        return res.status(404).json({ message: "Candidat introuvable." });
+      }
+
+      const [challenges] = await db.execute(`SELECT * FROM challenge ORDER BY id DESC`);
+
+      let count = 0;
+      for (const challenge of challenges) {
+        const match = await buildMatchResult(candidate, challenge, true);
+        if (match.eligible) {
+          await createNotification(
+            candidate.utilisateur_id,
+            "matching",
+            `Vous êtes éligible pour le challenge "${challenge.titre}".`
+          );
+        }
+        count++;
+      }
+
+      return res.status(200).json({
+        message: "Matching recalculé avec succès pour le candidat.",
+        mode: "candidat",
+        candidatId: candidate.id,
+        totalProcessed: count
+      });
+    }
+
+    return res.status(403).json({ message: "Type d'utilisateur non autorisé." });
+  } catch (error) {
+    logger.error("Erreur runMatching :", error);
+    return res.status(500).json({ message: "Erreur serveur." });
+  }
+};
+
+// ─── Candidate → matched challenges (live compute) ───────────────────────────
+
+exports.getCandidateMatches = async (req, res) => {
+  try {
+    const minScore = Number(req.query.minScore || 0);
+
+    const candidate = await getCandidateByUserId(req.user.id);
+    if (!candidate) {
+      return res.status(404).json({ message: "Candidat introuvable." });
+    }
+
+    const [challenges] = await db.execute(`SELECT * FROM challenge ORDER BY id DESC`);
+
+    let results = [];
+    for (const challenge of challenges) {
+      const match = await buildMatchResult(candidate, challenge, true);
+      results.push(match);
+    }
+
+    results = results.filter(match => match.eligible === true);
+    results = results.filter(match => match.score >= 30);
+
+    if (!Number.isNaN(minScore) && minScore > 0) {
+      results = results.filter(match => match.score >= minScore);
+    }
+
+    results.sort((a, b) => b.score - a.score);
+
+    return res.status(200).json({
+      candidate: { id: candidate.id, nom: candidate.nom, prenom: candidate.prenom },
+      filters: { eligibleOnly: true, minScore },
+      total: results.length,
+      matches: results
+    });
+  } catch (error) {
+    logger.error("Erreur getCandidateMatches :", error);
+    return res.status(500).json({ message: "Erreur serveur." });
+  }
+};
+
+// ─── Company → matched candidates for a challenge (live compute) ─────────────
+
+exports.getChallengeMatchedCandidates = async (req, res) => {
+  const { challengeId } = req.params;
+
+  try {
+    const eligibleOnly = String(req.query.eligibleOnly || "false").toLowerCase() === "true";
+    const minScore = Number(req.query.minScore || 0);
+    const company = await getCompanyByUserId(req.user.id);
+
+    if (!company) {
+      return res.status(404).json({ message: "Entreprise introuvable." });
+    }
+
+    const [challengeRows] = await db.execute(
+      `SELECT * FROM challenge WHERE id = ? AND entreprise_id = ?`,
+      [challengeId, company.id]
+    );
+
+    if (challengeRows.length === 0) {
+      return res.status(404).json({ message: "Challenge introuvable ou non autorisé." });
+    }
+
+    const challenge = challengeRows[0];
+
+    // Fetch challenge data once, not per candidate (performance fix)
+    const challengeSkills = await getChallengeSkills(challenge.id);
+    const criteria = await getChallengeEligibility(challenge.id);
+
+    const [candidates] = await db.execute(`SELECT * FROM candidat ORDER BY id DESC`);
+
+    let results = [];
+
+    for (const candidate of candidates) {
+      const candidateSkills = await getCandidateSkills(candidate.id);
+
+      const skillResult = calculateSkillScore(candidateSkills, challengeSkills);
+      const eligibilityResult = checkCandidateEligibilityDetailed(candidate, criteria);
+
+      let bonus = 0;
+      if (skillResult.matchedSkills.length >= 2) bonus = 10;
+      if (skillResult.matchedSkills.length >= 3) bonus = 15;
+      const finalScore = Math.min(skillResult.score + bonus, 100);
+      const eligible = skillResult.matchedSkills.length > 0 && eligibilityResult.eligible;
+
+      await saveMatchResult(candidate.id, challenge.id, finalScore, eligible);
+
+      results.push({
+        candidate: {
+          id: candidate.id,
+          nom: candidate.nom,
+          prenom: candidate.prenom,
+          ville: candidate.ville,
+          ecole: candidate.ecole,
+          diplome: candidate.diplome,
+          specialite: candidate.specialite,
+          niveauEtude: candidate.niveauEtude
+        },
+        score: finalScore,
+        eligible,
+        matchedSkills: skillResult.matchedSkills,
+        missingSkills: skillResult.missingSkills,
+        matchedCriteria: eligibilityResult.matchedCriteria,
+        failedCriteria: eligibilityResult.failedCriteria
+      });
+    }
+
+    if (eligibleOnly) {
+      results = results.filter(match => match.eligible === true);
+    }
+
+    if (!Number.isNaN(minScore) && minScore > 0) {
+      results = results.filter(match => match.score >= minScore);
+    }
+
+    results.sort((a, b) => {
+      if (b.eligible !== a.eligible) return Number(b.eligible) - Number(a.eligible);
+      return b.score - a.score;
+    });
+
+    return res.status(200).json({
+      challenge: { id: challenge.id, titre: challenge.titre, niveau: challenge.niveau },
+      filters: { eligibleOnly, minScore },
+      total: results.length,
+      matches: results
+    });
+  } catch (error) {
+    logger.error("Erreur getChallengeMatchedCandidates :", error);
+    return res.status(500).json({ message: "Erreur serveur." });
+  }
+};
+
+// ─── Candidate → saved matches ────────────────────────────────────────────────
+
 exports.getSavedCandidateMatches = async (req, res) => {
   try {
     const eligibleOnly = String(req.query.eligibleOnly || "false").toLowerCase() === "true";
     const minScore = Number(req.query.minScore || 0);
 
     const candidate = await getCandidateByUserId(req.user.id);
-
     if (!candidate) {
-      return res.status(404).json({
-        message: "Candidat introuvable."
-      });
+      return res.status(404).json({ message: "Candidat introuvable." });
     }
 
     let query = `
@@ -453,10 +418,7 @@ exports.getSavedCandidateMatches = async (req, res) => {
     `;
     const params = [candidate.id];
 
-    if (eligibleOnly) {
-      query += ` AND mr.eligible = true`;
-    }
-
+    if (eligibleOnly) query += ` AND mr.eligible = true`;
     if (!Number.isNaN(minScore) && minScore > 0) {
       query += ` AND mr.score >= ?`;
       params.push(minScore);
@@ -467,25 +429,18 @@ exports.getSavedCandidateMatches = async (req, res) => {
     const [rows] = await db.execute(query, params);
 
     return res.status(200).json({
-      candidate: {
-        id: candidate.id,
-        nom: candidate.nom,
-        prenom: candidate.prenom
-      },
-      filters: {
-        eligibleOnly,
-        minScore
-      },
+      candidate: { id: candidate.id, nom: candidate.nom, prenom: candidate.prenom },
+      filters: { eligibleOnly, minScore },
       total: rows.length,
       matches: rows
     });
   } catch (error) {
-    console.error("Erreur getSavedCandidateMatches :", error);
-    return res.status(500).json({
-      message: "Erreur serveur."
-    });
+    logger.error("Erreur getSavedCandidateMatches :", error);
+    return res.status(500).json({ message: "Erreur serveur." });
   }
 };
+
+// ─── Company → saved challenge matches ───────────────────────────────────────
 
 exports.getSavedChallengeMatches = async (req, res) => {
   const { challengeId } = req.params;
@@ -495,26 +450,17 @@ exports.getSavedChallengeMatches = async (req, res) => {
     const minScore = Number(req.query.minScore || 0);
 
     const company = await getCompanyByUserId(req.user.id);
-
     if (!company) {
-      return res.status(404).json({
-        message: "Entreprise introuvable."
-      });
+      return res.status(404).json({ message: "Entreprise introuvable." });
     }
 
     const [challengeRows] = await db.execute(
-      `
-      SELECT *
-      FROM challenge
-      WHERE id = ? AND entreprise_id = ?
-      `,
+      `SELECT * FROM challenge WHERE id = ? AND entreprise_id = ?`,
       [challengeId, company.id]
     );
 
     if (challengeRows.length === 0) {
-      return res.status(404).json({
-        message: "Challenge introuvable ou non autorisé."
-      });
+      return res.status(404).json({ message: "Challenge introuvable ou non autorisé." });
     }
 
     let query = `
@@ -537,10 +483,7 @@ exports.getSavedChallengeMatches = async (req, res) => {
     `;
     const params = [challengeId];
 
-    if (eligibleOnly) {
-      query += ` AND mr.eligible = true`;
-    }
-
+    if (eligibleOnly) query += ` AND mr.eligible = true`;
     if (!Number.isNaN(minScore) && minScore > 0) {
       query += ` AND mr.score >= ?`;
       params.push(minScore);
@@ -556,17 +499,12 @@ exports.getSavedChallengeMatches = async (req, res) => {
         titre: challengeRows[0].titre,
         niveau: challengeRows[0].niveau
       },
-      filters: {
-        eligibleOnly,
-        minScore
-      },
+      filters: { eligibleOnly, minScore },
       total: rows.length,
       matches: rows
     });
   } catch (error) {
-    console.error("Erreur getSavedChallengeMatches :", error);
-    return res.status(500).json({
-      message: "Erreur serveur."
-    });
+    logger.error("Erreur getSavedChallengeMatches :", error);
+    return res.status(500).json({ message: "Erreur serveur." });
   }
 };

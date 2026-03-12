@@ -77,6 +77,11 @@ router.delete(
   requireRole("entreprise"),
   companyController.deleteChallengeEligibility
 );
-
+router.get(
+  "/challenges",
+  authMiddleware,
+  requireRole("entreprise"),
+  companyController.getCompanyChallenges
+);
 
 module.exports = router;
